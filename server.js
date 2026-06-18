@@ -26,6 +26,9 @@ const COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
 const weaponConfig = loadWeaponConfig();
 const WEAPONS = weaponConfig.weapons;
 const DEFAULT_WEAPON_ID = weaponConfig.defaultWeaponId;
+const itemConfig = loadItemConfig();
+const ITEMS = itemConfig.items;
+const MAX_ACTIVE_ITEMS = itemConfig.maxActiveItems;
 
 const MAPS = {
   open_field: {
@@ -41,6 +44,14 @@ const MAPS = {
       { x: 320, y: 760, w: 210, h: 70 },
       { x: 1180, y: 780, w: 280, h: 70 },
       { x: 850, y: 170, w: 80, h: 120 }
+    ],
+    itemSpawnPoints: [
+      { x: 280, y: 220 },
+      { x: 900, y: 320 },
+      { x: 1510, y: 250 },
+      { x: 420, y: 900 },
+      { x: 920, y: 820 },
+      { x: 1500, y: 900 }
     ]
   },
   alley: {
@@ -58,6 +69,14 @@ const MAPS = {
       { x: 780, y: 760, w: 350, h: 70 },
       { x: 1180, y: 120, w: 70, h: 260 },
       { x: 1180, y: 560, w: 70, h: 270 }
+    ],
+    itemSpawnPoints: [
+      { x: 150, y: 160 },
+      { x: 440, y: 220 },
+      { x: 690, y: 740 },
+      { x: 950, y: 210 },
+      { x: 1310, y: 470 },
+      { x: 1180, y: 840 }
     ]
   },
   arena: {
@@ -76,19 +95,32 @@ const MAPS = {
       { x: 1240, y: 440, w: 180, h: 90 },
       { x: 740, y: 120, w: 120, h: 120 },
       { x: 740, y: 760, w: 120, h: 120 }
+    ],
+    itemSpawnPoints: [
+      { x: 800, y: 500 },
+      { x: 280, y: 220 },
+      { x: 1320, y: 220 },
+      { x: 280, y: 780 },
+      { x: 1320, y: 780 },
+      { x: 800, y: 300 },
+      { x: 800, y: 700 }
     ]
   }
 };
 
 const players = {};
 const bullets = [];
+const activeItems = [];
+const itemSpawnCooldowns = {};
 let nextBulletId = 1;
+let nextItemId = 1;
 let gameMode = "deathmatch";
 let roundState = "playing";
 let roundNumber = 1;
 let winner = null;
 let nextRoundTimer = 0;
 let currentMapId = DEFAULT_MAP_ID;
+let itemsEnabled = itemConfig.enabledByDefault;
 
 app.use(express.static("public"));
 
@@ -119,7 +151,8 @@ io.on("connection", (socket) => {
       kills: 0,
       deaths: 0,
       currentWeapon: DEFAULT_WEAPON_ID,
-      weapons: createWeaponStates()
+      weapons: createWeaponStates(),
+      buffs: createBuffState()
     };
 
     socket.emit("joined", { id: socket.id });
@@ -173,6 +206,13 @@ io.on("connection", (socket) => {
     startNewRound();
   });
 
+  socket.on("setItemsEnabled", (data) => {
+    if (!players[socket.id] || typeof (data && data.enabled) !== "boolean") return;
+
+    itemsEnabled = data.enabled;
+    resetItems();
+  });
+
   socket.on("disconnect", () => {
     delete players[socket.id];
     if (gameMode === "survival") {
@@ -184,6 +224,7 @@ io.on("connection", (socket) => {
 setInterval(() => {
   updatePlayers();
   updateBullets();
+  updateItems();
   updateRespawns();
   updateRound();
   broadcastState();
@@ -249,7 +290,7 @@ function updateBullets() {
     // The server is authoritative: it decides whether bullets damage players.
     const hitPlayer = findHitPlayer(bullet);
     if (hitPlayer) {
-      hitPlayer.hp -= bullet.damage;
+      applyDamage(hitPlayer, bullet.damage);
       bullets.splice(i, 1);
 
       if (hitPlayer.hp <= 0) {
@@ -263,6 +304,8 @@ function updateBullets() {
 function updateWeaponState(player) {
   if (!player || !player.alive) return;
 
+  updateBuffState(player);
+
   for (const weaponId of Object.keys(player.weapons)) {
     const weaponState = player.weapons[weaponId];
     if (weaponState.cooldownRemaining > 0) weaponState.cooldownRemaining -= 1;
@@ -272,6 +315,28 @@ function updateWeaponState(player) {
         weaponState.loaded = weaponState.magazineSize;
         weaponState.reloadRemaining = 0;
       }
+    }
+  }
+}
+
+function updateBuffState(player) {
+  if (!player.buffs) {
+    player.buffs = createBuffState();
+  }
+
+  if (player.buffs.speedRemaining > 0) {
+    player.buffs.speedRemaining -= 1;
+    if (player.buffs.speedRemaining <= 0) {
+      player.buffs.speedRemaining = 0;
+      player.buffs.speedMultiplier = 1;
+    }
+  }
+
+  if (player.buffs.shieldRemaining > 0) {
+    player.buffs.shieldRemaining -= 1;
+    if (player.buffs.shieldRemaining <= 0) {
+      player.buffs.shieldRemaining = 0;
+      player.buffs.shield = 0;
     }
   }
 }
@@ -296,6 +361,99 @@ function updateRespawns() {
   }
 }
 
+function updateItems() {
+  if (!itemsEnabled) return;
+
+  updateItemSpawnCooldowns();
+  spawnItems();
+  collectItems();
+}
+
+function updateItemSpawnCooldowns() {
+  const map = getCurrentMap();
+  for (let i = 0; i < map.itemSpawnPoints.length; i++) {
+    const key = getSpawnPointKey(i);
+    itemSpawnCooldowns[key] = Math.max(0, (itemSpawnCooldowns[key] || 0) - 1);
+  }
+}
+
+function spawnItems() {
+  if (activeItems.length >= MAX_ACTIVE_ITEMS) return;
+
+  const map = getCurrentMap();
+  const itemIds = Object.keys(ITEMS);
+  if (itemIds.length === 0) return;
+
+  for (let i = 0; i < map.itemSpawnPoints.length; i++) {
+    if (activeItems.length >= MAX_ACTIVE_ITEMS) return;
+
+    const key = getSpawnPointKey(i);
+    const occupied = activeItems.some((item) => item.spawnIndex === i);
+    if (occupied || (itemSpawnCooldowns[key] || 0) > 0) continue;
+
+    const item = ITEMS[itemIds[Math.floor(Math.random() * itemIds.length)]];
+    const point = map.itemSpawnPoints[i];
+    activeItems.push({
+      id: nextItemId++,
+      itemId: item.id,
+      name: item.name,
+      type: item.type,
+      x: point.x,
+      y: point.y,
+      radius: item.radius,
+      color: item.color,
+      spawnIndex: i
+    });
+    itemSpawnCooldowns[key] = item.spawnCooldownTicks;
+  }
+}
+
+function collectItems() {
+  for (let i = activeItems.length - 1; i >= 0; i--) {
+    const item = activeItems[i];
+    const player = findItemCollector(item);
+    if (!player) continue;
+
+    applyItem(player, item);
+    activeItems.splice(i, 1);
+  }
+}
+
+function findItemCollector(item) {
+  for (const player of Object.values(players)) {
+    if (!player.alive) continue;
+
+    if (distanceBetween(player.x, player.y, item.x, item.y) <= player.radius + item.radius) {
+      return player;
+    }
+  }
+
+  return null;
+}
+
+function applyItem(player, itemInstance) {
+  const item = ITEMS[itemInstance.itemId];
+  if (!item) return;
+
+  if (item.type === "heal") {
+    player.hp = clamp(player.hp + item.amount, 0, player.maxHp);
+  }
+
+  if (item.type === "ammo") {
+    refillCurrentWeapon(player);
+  }
+
+  if (item.type === "speed") {
+    player.buffs.speedMultiplier = item.multiplier;
+    player.buffs.speedRemaining = item.durationTicks;
+  }
+
+  if (item.type === "shield") {
+    player.buffs.shield = Math.max(player.buffs.shield, item.amount);
+    player.buffs.shieldRemaining = item.durationTicks;
+  }
+}
+
 function updateRound() {
   if (gameMode !== "survival" || roundState !== "ended") return;
 
@@ -309,6 +467,9 @@ function broadcastState() {
   io.emit("state", {
     players,
     bullets,
+    items: activeItems,
+    itemsEnabled,
+    itemConfigs: getPublicItemConfigs(),
     obstacles: getCurrentMap().obstacles,
     mapWidth: getCurrentMap().width,
     mapHeight: getCurrentMap().height,
@@ -357,6 +518,7 @@ function killPlayer(player, killerId) {
   player.respawnTimer = gameMode === "deathmatch" ? RESPAWN_TICKS : 0;
   player.deaths += 1;
   refillAllWeapons(player);
+  clearBuffs(player);
 
   const killer = players[killerId];
   if (killer && killer.id !== player.id) {
@@ -395,6 +557,7 @@ function startNewRound() {
   winner = null;
   nextRoundTimer = 0;
   bullets.length = 0;
+  resetItems();
 
   for (const player of Object.values(players)) {
     respawnPlayer(player);
@@ -411,6 +574,7 @@ function respawnPlayer(player) {
   player.hp = player.maxHp;
   player.alive = true;
   player.respawnTimer = 0;
+  clearBuffs(player);
 }
 
 function shootWeapon(player, angle) {
@@ -472,6 +636,14 @@ function refillAllWeapons(player) {
   player.currentWeapon = DEFAULT_WEAPON_ID;
 }
 
+function refillCurrentWeapon(player) {
+  const weapon = WEAPONS[player.currentWeapon] || WEAPONS[DEFAULT_WEAPON_ID];
+  const weaponState = player.weapons[player.currentWeapon] || player.weapons[DEFAULT_WEAPON_ID];
+  weaponState.loaded = weapon.magazineSize;
+  weaponState.reloadRemaining = 0;
+  weaponState.cooldownRemaining = 0;
+}
+
 function createWeaponStates() {
   const states = {};
   for (const weaponId of Object.keys(WEAPONS)) {
@@ -484,6 +656,46 @@ function createWeaponStates() {
     };
   }
   return states;
+}
+
+function createBuffState() {
+  return {
+    speedMultiplier: 1,
+    speedRemaining: 0,
+    shield: 0,
+    shieldRemaining: 0
+  };
+}
+
+function clearBuffs(player) {
+  player.buffs = createBuffState();
+}
+
+function applyDamage(player, damage) {
+  let remainingDamage = damage;
+
+  if (player.buffs && player.buffs.shield > 0) {
+    const absorbed = Math.min(player.buffs.shield, remainingDamage);
+    player.buffs.shield -= absorbed;
+    remainingDamage -= absorbed;
+    if (player.buffs.shield <= 0) {
+      player.buffs.shield = 0;
+      player.buffs.shieldRemaining = 0;
+    }
+  }
+
+  player.hp -= remainingDamage;
+}
+
+function resetItems() {
+  activeItems.length = 0;
+  for (const key of Object.keys(itemSpawnCooldowns)) {
+    delete itemSpawnCooldowns[key];
+  }
+}
+
+function getSpawnPointKey(index) {
+  return `${currentMapId}:${index}`;
 }
 
 function circleHitsAnyObstacle(x, y, radius) {
@@ -607,7 +819,65 @@ function getCurrentMap() {
 
 function getPlayerSpeed(player) {
   const weapon = WEAPONS[player.currentWeapon] || WEAPONS[DEFAULT_WEAPON_ID];
-  return BASE_PLAYER_SPEED * weapon.moveSpeedMultiplier;
+  const buffMultiplier = player.buffs ? player.buffs.speedMultiplier : 1;
+  return BASE_PLAYER_SPEED * weapon.moveSpeedMultiplier * buffMultiplier;
+}
+
+function loadItemConfig() {
+  const configPath = path.join(__dirname, "config", "items.json");
+  const rawConfig = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  const items = {};
+
+  for (const [itemId, item] of Object.entries(rawConfig.items || {})) {
+    items[itemId] = normalizeItemConfig(itemId, item);
+  }
+
+  return {
+    enabledByDefault: rawConfig.enabledByDefault !== false,
+    maxActiveItems: Math.max(0, Math.round(getNumber(rawConfig.maxActiveItems, 8))),
+    items
+  };
+}
+
+function normalizeItemConfig(itemId, item) {
+  const durationSeconds = getNumber(item.durationSeconds, 0);
+  const spawnCooldownSeconds = getNumber(item.spawnCooldownSeconds, 10);
+
+  return {
+    id: item.id || itemId,
+    name: item.name || itemId,
+    type: item.type || "heal",
+    amount: getNumber(item.amount, 0),
+    target: item.target || "currentWeapon",
+    multiplier: getNumber(item.multiplier, 1),
+    durationTicks: Math.max(0, Math.round(durationSeconds * TICK_RATE)),
+    spawnCooldownTicks: Math.max(1, Math.round(spawnCooldownSeconds * TICK_RATE)),
+    radius: Math.max(1, getNumber(item.radius, 14)),
+    color: typeof item.color === "string" ? item.color : "#ffffff",
+    config: {
+      durationSeconds,
+      spawnCooldownSeconds
+    }
+  };
+}
+
+function getPublicItemConfigs() {
+  const configs = {};
+  for (const [itemId, item] of Object.entries(ITEMS)) {
+    configs[itemId] = {
+      id: item.id,
+      name: item.name,
+      type: item.type,
+      amount: item.amount,
+      target: item.target,
+      multiplier: item.multiplier,
+      durationSeconds: item.config.durationSeconds,
+      spawnCooldownSeconds: item.config.spawnCooldownSeconds,
+      radius: item.radius,
+      color: item.color
+    };
+  }
+  return configs;
 }
 
 function loadWeaponConfig() {

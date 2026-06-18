@@ -4,6 +4,7 @@ const ctx = canvas.getContext("2d");
 const joinPanel = document.getElementById("joinPanel");
 const gameControls = document.getElementById("gameControls");
 const mapControls = document.getElementById("mapControls");
+const itemsToggle = document.getElementById("itemsToggle");
 const statusPanel = document.getElementById("statusPanel");
 const weaponStatus = document.getElementById("weaponStatus");
 const playerStatusList = document.getElementById("playerStatusList");
@@ -43,6 +44,7 @@ socket.on("state", (state) => {
   setupMapControls();
   updateModeButtons();
   updateMapButtons();
+  updateItemsToggle();
   updateStatusPanel();
 });
 
@@ -137,6 +139,10 @@ function drawWorld() {
     drawObstacle(obstacle);
   }
 
+  for (const item of latestState.items || []) {
+    drawItem(item);
+  }
+
   for (const bullet of latestState.bullets) {
     drawBullet(bullet);
   }
@@ -205,6 +211,7 @@ function drawPlayer(player) {
 
   drawPlayerName(player, screen.x, screen.y - player.radius - 22);
   drawHealthBar(player, screen.x, screen.y - player.radius - 14);
+  drawBuffIcons(player, screen.x + 31, screen.y - player.radius - 11);
 }
 
 function drawPlayerName(player, x, y) {
@@ -227,6 +234,57 @@ function drawHealthBar(player, x, y) {
   ctx.fillRect(x - width / 2, y, width * hpRatio, height);
 }
 
+function drawBuffIcons(player, x, y) {
+  if (!player.buffs) return;
+
+  const icons = [];
+  if (player.buffs.speedRemaining > 0) icons.push("speed");
+  if (player.buffs.shield > 0) icons.push("shield");
+
+  for (let i = 0; i < icons.length; i++) {
+    const iconX = x + i * 16;
+    if (icons[i] === "speed") {
+      drawSpeedBuffIcon(iconX, y);
+    }
+    if (icons[i] === "shield") {
+      drawShieldBuffIcon(iconX, y);
+    }
+  }
+}
+
+function drawSpeedBuffIcon(x, y) {
+  ctx.save();
+  ctx.fillStyle = "#7ee0ff";
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x + 2, y - 7);
+  ctx.lineTo(x - 4, y);
+  ctx.lineTo(x + 1, y);
+  ctx.lineTo(x - 1, y + 7);
+  ctx.lineTo(x + 6, y - 2);
+  ctx.lineTo(x + 1, y - 2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawShieldBuffIcon(x, y) {
+  ctx.save();
+  ctx.strokeStyle = "#8be9fd";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(x, y, 6, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.75)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(x, y, 3, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawBullet(bullet) {
   const screen = worldToScreen(bullet.x, bullet.y);
 
@@ -234,6 +292,52 @@ function drawBullet(bullet) {
   ctx.beginPath();
   ctx.arc(screen.x, screen.y, bullet.radius, 0, Math.PI * 2);
   ctx.fill();
+}
+
+function drawItem(item) {
+  const screen = worldToScreen(item.x, item.y);
+
+  ctx.save();
+  ctx.fillStyle = item.color;
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+  ctx.lineWidth = 2;
+
+  if (item.type === "heal") {
+    ctx.beginPath();
+    ctx.arc(screen.x, screen.y, item.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.strokeStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.moveTo(screen.x - 7, screen.y);
+    ctx.lineTo(screen.x + 7, screen.y);
+    ctx.moveTo(screen.x, screen.y - 7);
+    ctx.lineTo(screen.x, screen.y + 7);
+    ctx.stroke();
+  } else if (item.type === "ammo") {
+    ctx.fillRect(screen.x - item.radius, screen.y - item.radius, item.radius * 2, item.radius * 2);
+    ctx.strokeRect(screen.x - item.radius, screen.y - item.radius, item.radius * 2, item.radius * 2);
+  } else if (item.type === "speed") {
+    ctx.beginPath();
+    ctx.moveTo(screen.x + 2, screen.y - item.radius);
+    ctx.lineTo(screen.x - 8, screen.y + 1);
+    ctx.lineTo(screen.x + 1, screen.y + 1);
+    ctx.lineTo(screen.x - 2, screen.y + item.radius);
+    ctx.lineTo(screen.x + 9, screen.y - 2);
+    ctx.lineTo(screen.x, screen.y - 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  } else if (item.type === "shield") {
+    ctx.beginPath();
+    ctx.arc(screen.x, screen.y, item.radius, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(screen.x, screen.y, item.radius - 5, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  ctx.restore();
 }
 
 function drawCrosshair() {
@@ -283,10 +387,11 @@ function drawHud() {
   const mapText = latestState.maps && latestState.maps[latestState.currentMapId]
     ? latestState.maps[latestState.currentMapId].name
     : "-";
+  const itemsText = latestState.itemsEnabled ? "开启" : "关闭";
   const weaponText = getWeaponHudText(me);
 
   ctx.fillStyle = "rgba(0, 0, 0, 0.42)";
-  ctx.fillRect(14, 14, 330, 182);
+  ctx.fillRect(14, 14, 330, 206);
 
   ctx.fillStyle = "#f3f6fb";
   ctx.font = "16px Arial, sans-serif";
@@ -294,9 +399,10 @@ function drawHud() {
   ctx.fillText(`我的血量：${hpText}`, 28, 64);
   ctx.fillText(`模式：${modeText}`, 28, 88);
   ctx.fillText(`地图：${mapText}`, 28, 112);
-  ctx.fillText(`第 ${latestState.roundNumber || 1} 局，存活：${aliveCount}`, 28, 136);
-  ctx.fillText(`武器：${weaponText}`, 28, 160);
-  ctx.fillText("1-4 切枪，R 换弹", 28, 184);
+  ctx.fillText(`道具：${itemsText}`, 28, 136);
+  ctx.fillText(`第 ${latestState.roundNumber || 1} 局，存活：${aliveCount}`, 28, 160);
+  ctx.fillText(`武器：${weaponText}`, 28, 184);
+  ctx.fillText("1-4 切枪，R 换弹", 28, 208);
 
   drawRoundBanner();
 }
@@ -384,6 +490,7 @@ function updateWeaponStatus(me) {
       <span>移动速度</span>
       <span>${escapeHtml(speedText)}</span>
     </div>
+    ${getBuffStatusHtml(me)}
     <div class="bar">
       <div class="bar-fill" style="width: ${getAmmoRatio(currentState, currentWeapon) * 100}%; background: #7ee0ff;"></div>
     </div>
@@ -426,6 +533,7 @@ function updatePlayerStatusList(players) {
         <div class="player-line"><span>K/D</span><span>${player.kills || 0}/${player.deaths || 0}</span></div>
         <div class="player-line"><span>武器</span><span>${escapeHtml(weapon ? weapon.name : "-")}</span></div>
         <div class="player-line"><span>速度</span><span>${escapeHtml(speedText)}</span></div>
+        ${getBuffStatusHtml(player)}
         <div class="player-line"><span>弹药</span><span>${weaponState ? weaponState.loaded : 0}/${weapon ? weapon.magazineSize : 0}</span></div>
         <div class="bar"><div class="bar-fill" style="width: ${ammoRatio * 100}%; background: #ffd166;"></div></div>
       </article>
@@ -544,6 +652,11 @@ function setupGameControls() {
       socket.emit("setMode", { mode });
     });
   }
+
+  itemsToggle.addEventListener("click", () => {
+    const nextEnabled = !(latestState && latestState.itemsEnabled);
+    socket.emit("setItemsEnabled", { enabled: nextEnabled });
+  });
 }
 
 function setupMapControls() {
@@ -582,6 +695,13 @@ function updateMapButtons() {
   }
 }
 
+function updateItemsToggle() {
+  if (!latestState) return;
+
+  itemsToggle.classList.toggle("selected", latestState.itemsEnabled);
+  itemsToggle.textContent = latestState.itemsEnabled ? "开启" : "关闭";
+}
+
 function getDefaultPlayerName() {
   return `Player${Math.floor(1000 + Math.random() * 9000)}`;
 }
@@ -599,6 +719,19 @@ function getWeaponHudText(player) {
 
   const status = weaponState.reloadRemaining > 0 ? "换弹中" : `${weaponState.loaded}/${weapon.magazineSize}`;
   return `${weapon.name} ${status}`;
+}
+
+function getBuffStatusHtml(player) {
+  if (!player || !player.buffs) return "";
+
+  const lines = [];
+  if (player.buffs.speedRemaining > 0) {
+    lines.push(`<div class="player-line"><span>加速</span><span>${formatTicks(player.buffs.speedRemaining)}s</span></div>`);
+  }
+  if (player.buffs.shield > 0) {
+    lines.push(`<div class="player-line"><span>护盾</span><span>${Math.ceil(player.buffs.shield)} / ${formatTicks(player.buffs.shieldRemaining)}s</span></div>`);
+  }
+  return lines.join("");
 }
 
 function getAmmoRatio(weaponState, weapon) {

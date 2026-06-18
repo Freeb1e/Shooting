@@ -1,0 +1,44 @@
+{
+  "enabledByDefault": true,
+  "maxActiveItems": 8,
+  "items": {
+    "small_health": {
+      "id": "small_health",
+      "name": "小治疗包",
+      "type": "heal",
+      "amount": 25,
+      "spawnCooldownSeconds": 10,
+      "radius": 14,
+      "color": "#35d07f"
+    },
+    "ammo_box": {
+      "id": "ammo_box",
+      "name": "弹药箱",
+      "type": "ammo",
+      "target": "currentWeapon",
+      "spawnCooldownSeconds": 14,
+      "radius": 14,
+      "color": "#ffd166"
+    },
+    "speed_boost": {
+      "id": "speed_boost",
+      "name": "轻量化鞋",
+      "type": "speed",
+      "multiplier": 1.2,
+      "durationSeconds": 8,
+      "spawnCooldownSeconds": 22,
+      "radius": 14,
+      "color": "#7ee0ff"
+    },
+    "shield": {
+      "id": "shield",
+      "name": "护盾电池",
+      "type": "shield",
+      "amount": 40,
+      "durationSeconds": 10,
+      "spawnCooldownSeconds": 28,
+      "radius": 14,
+      "color": "#8be9fd"
+    }
+  }
+}
