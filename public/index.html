@@ -7,6 +7,31 @@
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
+    <form id="joinPanel" class="join-panel">
+      <h1>Circle Battle</h1>
+      <label for="playerName">玩家 ID</label>
+      <input id="playerName" name="playerName" maxlength="16" autocomplete="off" placeholder="输入你的名字" required />
+
+      <div class="color-label">选择颜色</div>
+      <div id="colorOptions" class="color-options" aria-label="选择玩家颜色"></div>
+
+      <button type="submit">开始游戏</button>
+    </form>
+    <div id="gameControls" class="game-controls hidden">
+      <div class="control-group">
+        <span>模式</span>
+        <button type="button" data-mode="deathmatch" class="mode-button selected">死亡竞技</button>
+        <button type="button" data-mode="survival" class="mode-button">单场生存</button>
+      </div>
+      <div id="mapControls" class="control-group">
+        <span>地图</span>
+      </div>
+    </div>
+    <aside id="statusPanel" class="status-panel hidden">
+      <h2>状态栏</h2>
+      <div id="weaponStatus" class="weapon-status"></div>
+      <div id="playerStatusList" class="player-status-list"></div>
+    </aside>
     <canvas id="gameCanvas"></canvas>
     <script src="/socket.io/socket.io.js"></script>
     <script src="/client.js"></script>

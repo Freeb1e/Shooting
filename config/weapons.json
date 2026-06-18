@@ -1,0 +1,61 @@
+{
+  "defaultWeaponId": "pistol",
+  "weapons": {
+    "pistol": {
+      "id": "pistol",
+      "name": "手枪",
+      "magazineSize": 12,
+      "damage": 20,
+      "bulletRadius": 5,
+      "bulletSpeed": 12,
+      "bulletLifeSeconds": 2,
+      "cooldownMs": 250,
+      "reloadMs": 900,
+      "pelletCount": 1,
+      "spreadDegrees": 0,
+      "moveSpeedMultiplier": 1
+    },
+    "smg": {
+      "id": "smg",
+      "name": "冲锋枪",
+      "magazineSize": 25,
+      "damage": 8,
+      "bulletRadius": 4,
+      "bulletSpeed": 13,
+      "bulletLifeSeconds": 1.5,
+      "cooldownMs": 80,
+      "reloadMs": 1300,
+      "pelletCount": 1,
+      "spreadDegrees": 0,
+      "moveSpeedMultiplier": 1.08
+    },
+    "shotgun": {
+      "id": "shotgun",
+      "name": "霰弹枪",
+      "magazineSize": 5,
+      "damage": 8,
+      "bulletRadius": 4,
+      "bulletSpeed": 11,
+      "bulletLifeSeconds": 1.17,
+      "cooldownMs": 700,
+      "reloadMs": 1600,
+      "pelletCount": 6,
+      "spreadDegrees": 28,
+      "moveSpeedMultiplier": 0.94
+    },
+    "sniper": {
+      "id": "sniper",
+      "name": "狙击枪",
+      "magazineSize": 4,
+      "damage": 55,
+      "bulletRadius": 5,
+      "bulletSpeed": 40,
+      "bulletLifeSeconds": 4,
+      "cooldownMs": 1100,
+      "reloadMs": 1800,
+      "pelletCount": 1,
+      "spreadDegrees": 0,
+      "moveSpeedMultiplier": 0.86
+    }
+  }
+}
