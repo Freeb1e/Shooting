@@ -20,7 +20,19 @@ let moveMarkers = [];
 let joinedGame = false;
 let selectedColor = "#4cc9f0";
 let lastStatusPanelUpdate = 0;
+let inputSeq = 0;
+let predictedSelf = null;
+let pendingInputs = [];
+let renderBullets = [];
+let nextRenderBulletId = 1;
+let lastRenderTime = performance.now();
 const STATUS_PANEL_UPDATE_MS = 200;
+const BASE_CLIENT_PLAYER_SPEED = 2;
+const SERVER_FRAME_MS = 1000 / 60;
+const RECONCILE_NUDGE_DISTANCE = 24;
+const RECONCILE_SNAP_DISTANCE = 120;
+const BULLET_RECONCILE_NUDGE_DISTANCE = 18;
+const BULLET_RECONCILE_SNAP_DISTANCE = 90;
 
 const availableColors = [
   "#4cc9f0",
@@ -47,6 +59,7 @@ socket.on("state", (state) => {
     ...(latestConfig || {}),
     ...state
   };
+  reconcileLocalPrediction();
   setupMapControls();
   updateModeButtons();
   updateMapButtons();
@@ -55,11 +68,13 @@ socket.on("state", (state) => {
 });
 
 socket.on("config", (config) => {
+  const previousMapId = latestState && latestState.currentMapId;
   latestConfig = config;
   latestState = {
     ...(latestState || {}),
     ...config
   };
+  resetPredictionIfMapChanged(previousMapId, config.currentMapId);
   setupMapControls();
   updateModeButtons();
   updateMapButtons();
@@ -94,16 +109,21 @@ canvas.addEventListener("mousedown", (event) => {
   const world = screenToWorld(mouseScreen.x, mouseScreen.y);
 
   if (event.button === 2) {
+    const seq = nextInputSeq();
     addMoveMarker(world.x, world.y);
-    socket.emit("move", { x: world.x, y: world.y });
+    queueMovePrediction(seq, world.x, world.y);
+    socket.emit("move", { seq, x: world.x, y: world.y });
   }
 
   if (event.button === 0) {
     const me = latestState.players[selfId];
     if (!me || !me.alive) return;
 
-    const angle = Math.atan2(world.y - me.y, world.x - me.x);
-    socket.emit("shoot", { angle });
+    const shooter = predictedSelf || me;
+    const angle = Math.atan2(world.y - shooter.y, world.x - shooter.x);
+    const seq = nextInputSeq();
+    addClientSimulatedBullet(seq, shooter, angle);
+    socket.emit("shoot", { seq, angle });
   }
 });
 
@@ -123,10 +143,13 @@ window.addEventListener("keydown", (event) => {
 
 requestAnimationFrame(render);
 
-function render() {
+function render(frameTime = performance.now()) {
   requestAnimationFrame(render);
 
+  const deltaScale = getFrameDeltaScale(frameTime);
   updateMoveMarkers();
+  updatePredictedSelf(deltaScale);
+  updateRenderBullets(deltaScale);
   ctx.fillStyle = "#101318";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -141,7 +164,7 @@ function render() {
 }
 
 function updateCamera() {
-  const me = latestState.players[selfId];
+  const me = getRenderableSelf();
   const focusX = me ? me.x : latestState.mapWidth / 2;
   const focusY = me ? me.y : latestState.mapHeight / 2;
 
@@ -162,11 +185,11 @@ function drawWorld() {
     drawItem(item);
   }
 
-  for (const bullet of latestState.bullets) {
+  for (const bullet of renderBullets) {
     drawBullet(bullet);
   }
 
-  for (const player of Object.values(latestState.players)) {
+  for (const player of getRenderablePlayers()) {
     drawPlayer(player);
   }
 
@@ -307,10 +330,12 @@ function drawShieldBuffIcon(x, y) {
 function drawBullet(bullet) {
   const screen = worldToScreen(bullet.x, bullet.y);
 
+  ctx.save();
   ctx.fillStyle = "#ffd166";
   ctx.beginPath();
   ctx.arc(screen.x, screen.y, bullet.radius, 0, Math.PI * 2);
   ctx.fill();
+  ctx.restore();
 }
 
 function drawItem(item) {
@@ -603,6 +628,316 @@ function drawCenterBanner(title, subtitle) {
   ctx.font = "16px Arial, sans-serif";
   ctx.fillText(subtitle, canvas.width / 2, y + 74);
   ctx.textAlign = "start";
+}
+
+function nextInputSeq() {
+  inputSeq += 1;
+  return inputSeq;
+}
+
+function queueMovePrediction(seq, x, y) {
+  pendingInputs.push({ seq, type: "move", x, y });
+  ensurePredictedSelf();
+
+  if (!predictedSelf || !predictedSelf.alive) return;
+
+  const target = clampPointToMap(x, y, predictedSelf.radius);
+  predictedSelf.targetX = target.x;
+  predictedSelf.targetY = target.y;
+}
+
+function reconcileLocalPrediction() {
+  if (!latestState || !latestState.players || !selfId) return;
+
+  const serverSelf = latestState.players[selfId];
+  if (!serverSelf) {
+    predictedSelf = null;
+    pendingInputs = [];
+    renderBullets = [];
+    return;
+  }
+
+  const acknowledgedSeq = serverSelf.lastProcessedInputSeq || 0;
+  pendingInputs = pendingInputs.filter((input) => input.seq > acknowledgedSeq);
+  reconcileRenderBullets(acknowledgedSeq);
+
+  const previousPrediction = predictedSelf;
+
+  if (!serverSelf.alive) {
+    predictedSelf = clonePlayer(serverSelf);
+    pendingInputs = [];
+    return;
+  }
+
+  if (previousPrediction && previousPrediction.alive) {
+    const drift = Math.hypot(previousPrediction.x - serverSelf.x, previousPrediction.y - serverSelf.y);
+
+    predictedSelf = clonePlayer(serverSelf);
+    predictedSelf.x = previousPrediction.x;
+    predictedSelf.y = previousPrediction.y;
+    predictedSelf.targetX = previousPrediction.targetX;
+    predictedSelf.targetY = previousPrediction.targetY;
+
+    if (drift > RECONCILE_SNAP_DISTANCE) {
+      predictedSelf.x = serverSelf.x;
+      predictedSelf.y = serverSelf.y;
+      predictedSelf.targetX = serverSelf.targetX;
+      predictedSelf.targetY = serverSelf.targetY;
+    } else if (drift > RECONCILE_NUDGE_DISTANCE) {
+      predictedSelf.x = lerp(previousPrediction.x, serverSelf.x, 0.08);
+      predictedSelf.y = lerp(previousPrediction.y, serverSelf.y, 0.08);
+    }
+  } else {
+    predictedSelf = clonePlayer(serverSelf);
+  }
+
+  const latestMove = [...pendingInputs].reverse().find((input) => input.type === "move");
+  if (latestMove) {
+    predictedSelf.targetX = latestMove.x;
+    predictedSelf.targetY = latestMove.y;
+  }
+}
+
+function resetPredictionIfMapChanged(previousMapId, nextMapId) {
+  if (!previousMapId || !nextMapId || previousMapId === nextMapId) return;
+
+  predictedSelf = null;
+  pendingInputs = [];
+  renderBullets = [];
+}
+
+function ensurePredictedSelf() {
+  if (predictedSelf || !latestState || !latestState.players) return;
+
+  const serverSelf = latestState.players[selfId];
+  if (serverSelf) {
+    predictedSelf = clonePlayer(serverSelf);
+  }
+}
+
+function updatePredictedSelf(deltaScale) {
+  if (!latestState || !latestState.players || !selfId) return;
+
+  ensurePredictedSelf();
+  if (!predictedSelf || !predictedSelf.alive) return;
+
+  const dx = predictedSelf.targetX - predictedSelf.x;
+  const dy = predictedSelf.targetY - predictedSelf.y;
+  const distance = Math.hypot(dx, dy);
+  const speed = getClientPlayerSpeed(predictedSelf) * deltaScale;
+
+  if (distance <= speed) {
+    const target = clampPointToMap(predictedSelf.targetX, predictedSelf.targetY, predictedSelf.radius);
+    if (!circleHitsAnyObstacle(target.x, target.y, predictedSelf.radius)) {
+      predictedSelf.x = target.x;
+      predictedSelf.y = target.y;
+    }
+    return;
+  }
+
+  const nextX = predictedSelf.x + (dx / distance) * speed;
+  const nextY = predictedSelf.y + (dy / distance) * speed;
+  const clamped = clampPointToMap(nextX, nextY, predictedSelf.radius);
+
+  if (!circleHitsAnyObstacle(clamped.x, clamped.y, predictedSelf.radius)) {
+    predictedSelf.x = clamped.x;
+    predictedSelf.y = clamped.y;
+  }
+}
+
+function addClientSimulatedBullet(seq, shooter, angle) {
+  if (!latestState || !latestState.weapons) return;
+
+  const weapon = latestState.weapons[shooter.currentWeapon];
+  const weaponState = shooter.weapons && shooter.weapons[shooter.currentWeapon];
+  if (!weapon || !weaponState || weaponState.loaded <= 0 || weaponState.reloadRemaining > 0 || weaponState.cooldownRemaining > 0) return;
+
+  const pelletCount = Math.max(1, weapon.pelletCount || 1);
+  const spread = degreesToRadians(weapon.spreadDegrees || 0);
+  const startAngle = angle - spread / 2;
+  const step = pelletCount > 1 ? spread / Math.max(1, pelletCount - 1) : 0;
+
+  for (let i = 0; i < pelletCount; i++) {
+    const pelletAngle = pelletCount === 1 ? angle : startAngle + step * i;
+    const radius = weapon.bulletRadius || 4;
+
+    renderBullets.push({
+      localId: `local-${nextRenderBulletId++}`,
+      serverId: null,
+      clientSeq: seq,
+      ownerId: selfId,
+      weaponId: weapon.id,
+      confirmed: false,
+      x: shooter.x + Math.cos(pelletAngle) * (shooter.radius + radius + 2),
+      y: shooter.y + Math.sin(pelletAngle) * (shooter.radius + radius + 2),
+      vx: Math.cos(pelletAngle) * ((weapon.bulletSpeed || 10) * 0.5),
+      vy: Math.sin(pelletAngle) * ((weapon.bulletSpeed || 10) * 0.5),
+      radius,
+      life: Math.max(8, Math.round((weapon.bulletLifeSeconds || 1) * (latestState.tickRate || 60)))
+    });
+  }
+}
+
+function reconcileRenderBullets(acknowledgedSeq) {
+  const matchedLocalIds = new Set();
+  const serverBullets = latestState.bullets || [];
+
+  for (const serverBullet of serverBullets) {
+    const existing = findRenderBulletForServerBullet(serverBullet);
+    if (existing) {
+      adoptServerBullet(existing, serverBullet);
+      matchedLocalIds.add(existing.localId);
+      continue;
+    }
+
+    const created = createRenderBulletFromServer(serverBullet);
+    renderBullets.push(created);
+    matchedLocalIds.add(created.localId);
+  }
+
+  renderBullets = renderBullets.filter((bullet) => {
+    if (matchedLocalIds.has(bullet.localId)) return true;
+    if (!bullet.confirmed && bullet.ownerId === selfId && bullet.clientSeq > acknowledgedSeq) return true;
+    return false;
+  });
+}
+
+function findRenderBulletForServerBullet(serverBullet) {
+  const byServerId = renderBullets.find((bullet) => bullet.serverId === serverBullet.id);
+  if (byServerId) return byServerId;
+
+  if (serverBullet.ownerId !== selfId || !Number.isSafeInteger(serverBullet.clientSeq)) return null;
+
+  return renderBullets.find((bullet) => (
+    !bullet.serverId &&
+    bullet.ownerId === selfId &&
+    bullet.clientSeq === serverBullet.clientSeq &&
+    bullet.weaponId === serverBullet.weaponId
+  ));
+}
+
+function adoptServerBullet(renderBullet, serverBullet) {
+  const drift = Math.hypot(renderBullet.x - serverBullet.x, renderBullet.y - serverBullet.y);
+
+  renderBullet.serverId = serverBullet.id;
+  renderBullet.clientSeq = serverBullet.clientSeq || renderBullet.clientSeq;
+  renderBullet.ownerId = serverBullet.ownerId;
+  renderBullet.weaponId = serverBullet.weaponId;
+  renderBullet.vx = serverBullet.vx;
+  renderBullet.vy = serverBullet.vy;
+  renderBullet.radius = serverBullet.radius;
+  renderBullet.life = serverBullet.life;
+  renderBullet.confirmed = true;
+
+  if (drift > BULLET_RECONCILE_SNAP_DISTANCE) {
+    renderBullet.x = serverBullet.x;
+    renderBullet.y = serverBullet.y;
+  } else if (drift > BULLET_RECONCILE_NUDGE_DISTANCE) {
+    renderBullet.x = lerp(renderBullet.x, serverBullet.x, 0.18);
+    renderBullet.y = lerp(renderBullet.y, serverBullet.y, 0.18);
+  }
+}
+
+function createRenderBulletFromServer(serverBullet) {
+  return {
+    localId: `server-${serverBullet.id}`,
+    serverId: serverBullet.id,
+    clientSeq: serverBullet.clientSeq || 0,
+    ownerId: serverBullet.ownerId,
+    weaponId: serverBullet.weaponId,
+    confirmed: true,
+    x: serverBullet.x,
+    y: serverBullet.y,
+    vx: serverBullet.vx,
+    vy: serverBullet.vy,
+    radius: serverBullet.radius,
+    life: serverBullet.life
+  };
+}
+
+function updateRenderBullets(deltaScale) {
+  if (!latestState) return;
+
+  renderBullets = renderBullets.filter((bullet) => {
+    bullet.x += bullet.vx * deltaScale;
+    bullet.y += bullet.vy * deltaScale;
+    bullet.life -= deltaScale;
+
+    return (
+      bullet.life > 0 &&
+      bullet.x >= 0 &&
+      bullet.x <= latestState.mapWidth &&
+      bullet.y >= 0 &&
+      bullet.y <= latestState.mapHeight &&
+      !circleHitsAnyObstacle(bullet.x, bullet.y, bullet.radius)
+    );
+  });
+}
+
+function getRenderableSelf() {
+  if (predictedSelf && predictedSelf.alive) return predictedSelf;
+  return latestState && latestState.players ? latestState.players[selfId] : null;
+}
+
+function getRenderablePlayers() {
+  const players = Object.values(latestState.players);
+  if (!predictedSelf) return players;
+
+  return players.map((player) => (player.id === selfId ? predictedSelf : player));
+}
+
+function clonePlayer(player) {
+  return {
+    ...player,
+    weapons: cloneWeaponStates(player.weapons),
+    buffs: player.buffs ? { ...player.buffs } : null
+  };
+}
+
+function cloneWeaponStates(weapons) {
+  const clone = {};
+  for (const [weaponId, weaponState] of Object.entries(weapons || {})) {
+    clone[weaponId] = { ...weaponState };
+  }
+  return clone;
+}
+
+function getClientPlayerSpeed(player) {
+  const weapon = latestState.weapons && latestState.weapons[player.currentWeapon];
+  const weaponMultiplier = weapon ? weapon.moveSpeedMultiplier : 1;
+  const buffMultiplier = player.buffs ? player.buffs.speedMultiplier : 1;
+  return BASE_CLIENT_PLAYER_SPEED * weaponMultiplier * buffMultiplier;
+}
+
+function clampPointToMap(x, y, radius) {
+  return {
+    x: clamp(x, radius, latestState.mapWidth - radius),
+    y: clamp(y, radius, latestState.mapHeight - radius)
+  };
+}
+
+function circleHitsAnyObstacle(x, y, radius) {
+  return (latestState.obstacles || []).some((obstacle) => circleRectCollision(x, y, radius, obstacle));
+}
+
+function circleRectCollision(circleX, circleY, radius, rect) {
+  const nearestX = clamp(circleX, rect.x, rect.x + rect.w);
+  const nearestY = clamp(circleY, rect.y, rect.y + rect.h);
+  return Math.hypot(circleX - nearestX, circleY - nearestY) < radius;
+}
+
+function degreesToRadians(degrees) {
+  return (degrees * Math.PI) / 180;
+}
+
+function lerp(start, end, amount) {
+  return start + (end - start) * amount;
+}
+
+function getFrameDeltaScale(frameTime) {
+  const elapsed = Math.max(0, Math.min(100, frameTime - lastRenderTime));
+  lastRenderTime = frameTime;
+  return elapsed > 0 ? elapsed / SERVER_FRAME_MS : 1;
 }
 
 function screenToWorld(screenX, screenY) {

@@ -31,99 +31,8 @@ const itemConfig = loadItemConfig();
 const ITEMS = itemConfig.items;
 const MAX_ACTIVE_ITEMS = itemConfig.maxActiveItems;
 
-const MAPS = {
-  open_field: {
-    id: "open_field",
-    name: "开阔训练场",
-    width: 1800,
-    height: 1100,
-    description: "远距离交火多，适合狙击和拉扯。",
-    obstacles: [
-      { x: 420, y: 230, w: 130, h: 90 },
-      { x: 780, y: 480, w: 260, h: 80 },
-      { x: 1240, y: 260, w: 130, h: 170 },
-      { x: 320, y: 760, w: 210, h: 70 },
-      { x: 1180, y: 780, w: 280, h: 70 },
-      { x: 850, y: 170, w: 80, h: 120 }
-    ],
-    itemSpawnPoints: [
-      { x: 280, y: 220 },
-      { x: 900, y: 320 },
-      { x: 1510, y: 250 },
-      { x: 420, y: 900 },
-      { x: 920, y: 820 },
-      { x: 1500, y: 900 }
-    ],
-    weaponDropPoints: [
-      { x: 900, y: 560 },
-      { x: 1540, y: 560 },
-      { x: 260, y: 560 }
-    ]
-  },
-  alley: {
-    id: "alley",
-    name: "巷战街区",
-    width: 1500,
-    height: 950,
-    description: "狭窄通道和拐角多，适合冲锋枪和霰弹枪。",
-    obstacles: [
-      { x: 260, y: 120, w: 90, h: 620 },
-      { x: 520, y: 260, w: 90, h: 570 },
-      { x: 780, y: 120, w: 90, h: 620 },
-      { x: 1040, y: 260, w: 90, h: 570 },
-      { x: 260, y: 120, w: 440, h: 70 },
-      { x: 780, y: 760, w: 350, h: 70 },
-      { x: 1180, y: 120, w: 70, h: 260 },
-      { x: 1180, y: 560, w: 70, h: 270 }
-    ],
-    itemSpawnPoints: [
-      { x: 150, y: 160 },
-      { x: 440, y: 220 },
-      { x: 690, y: 740 },
-      { x: 950, y: 210 },
-      { x: 1310, y: 470 },
-      { x: 1180, y: 840 }
-    ],
-    weaponDropPoints: [
-      { x: 380, y: 470 },
-      { x: 700, y: 470 },
-      { x: 1320, y: 760 }
-    ]
-  },
-  arena: {
-    id: "arena",
-    name: "中心竞技场",
-    width: 1600,
-    height: 1000,
-    description: "中心掩体争夺激烈，中距离武器较均衡。",
-    obstacles: [
-      { x: 700, y: 420, w: 200, h: 160 },
-      { x: 420, y: 260, w: 150, h: 90 },
-      { x: 1030, y: 260, w: 150, h: 90 },
-      { x: 420, y: 650, w: 150, h: 90 },
-      { x: 1030, y: 650, w: 150, h: 90 },
-      { x: 180, y: 440, w: 180, h: 90 },
-      { x: 1240, y: 440, w: 180, h: 90 },
-      { x: 740, y: 120, w: 120, h: 120 },
-      { x: 740, y: 760, w: 120, h: 120 }
-    ],
-    itemSpawnPoints: [
-      { x: 800, y: 500 },
-      { x: 280, y: 220 },
-      { x: 1320, y: 220 },
-      { x: 280, y: 780 },
-      { x: 1320, y: 780 },
-      { x: 800, y: 300 },
-      { x: 800, y: 700 }
-    ],
-    weaponDropPoints: [
-      { x: 800, y: 300 },
-      { x: 800, y: 700 },
-      { x: 210, y: 500 },
-      { x: 1390, y: 500 }
-    ]
-  }
-};
+const mapConfig = loadMapConfig();
+const MAPS = mapConfig.maps;
 
 const players = {};
 const bullets = [];
@@ -136,7 +45,7 @@ let roundState = "playing";
 let roundNumber = 1;
 let winner = null;
 let nextRoundTimer = 0;
-let currentMapId = DEFAULT_MAP_ID;
+let currentMapId = mapConfig.defaultMapId;
 let itemsEnabled = itemConfig.enabledByDefault;
 
 app.use(express.static("public"));
@@ -170,6 +79,7 @@ io.on("connection", (socket) => {
       deaths: 0,
       currentWeapon: DEFAULT_WEAPON_ID,
       fallbackWeaponAfterDrop: DEFAULT_WEAPON_ID,
+      lastProcessedInputSeq: 0,
       weapons: createWeaponStates(),
       buffs: createBuffState()
     };
@@ -185,13 +95,16 @@ io.on("connection", (socket) => {
     const target = clampPointToMap(data.x, data.y, player.radius);
     player.targetX = target.x;
     player.targetY = target.y;
+    player.lastProcessedInputSeq = Math.max(player.lastProcessedInputSeq || 0, getInputSeq(data));
   });
 
   socket.on("shoot", (data) => {
     const player = players[socket.id];
     if (!player || !player.alive || roundState !== "playing" || !isValidAngle(data && data.angle)) return;
 
-    shootWeapon(player, data.angle);
+    const inputSeq = getInputSeq(data);
+    shootWeapon(player, data.angle, inputSeq);
+    player.lastProcessedInputSeq = Math.max(player.lastProcessedInputSeq || 0, inputSeq);
   });
 
   socket.on("switchWeapon", (data) => {
@@ -619,14 +532,14 @@ function respawnPlayer(player) {
   clearBuffs(player);
 }
 
-function shootWeapon(player, angle) {
+function shootWeapon(player, angle, clientSeq) {
   const weapon = WEAPONS[player.currentWeapon] || WEAPONS[DEFAULT_WEAPON_ID];
   const weaponState = player.weapons[player.currentWeapon] || player.weapons[DEFAULT_WEAPON_ID];
 
-  if (!weaponState || weaponState.reloadRemaining > 0 || weaponState.cooldownRemaining > 0) return;
+  if (!weaponState || weaponState.reloadRemaining > 0 || weaponState.cooldownRemaining > 0) return false;
   if (weaponState.loaded <= 0) {
     handleEmptyWeapon(player, weapon);
-    return;
+    return false;
   }
 
   weaponState.loaded -= 1;
@@ -642,6 +555,7 @@ function shootWeapon(player, angle) {
       id: nextBulletId++,
       ownerId: player.id,
       weaponId: weapon.id,
+      clientSeq,
       x: player.x + Math.cos(pelletAngle) * (player.radius + weapon.bulletRadius + 2),
       y: player.y + Math.sin(pelletAngle) * (player.radius + weapon.bulletRadius + 2),
       vx: Math.cos(pelletAngle) * weapon.bulletSpeed,
@@ -655,6 +569,8 @@ function shootWeapon(player, angle) {
   if (weaponState.loaded <= 0) {
     handleEmptyWeapon(player, weapon);
   }
+
+  return true;
 }
 
 function startReload(player) {
@@ -845,6 +761,10 @@ function isValidPoint(data) {
   );
 }
 
+function getInputSeq(data) {
+  return data && Number.isSafeInteger(data.seq) && data.seq > 0 ? data.seq : 0;
+}
+
 function isValidAngle(angle) {
   return Number.isFinite(angle) && angle >= -Math.PI * 2 && angle <= Math.PI * 2;
 }
@@ -933,6 +853,7 @@ function getPublicWeaponConfigs() {
       cooldownTicks: weapon.cooldownTicks,
       reloadTicks: weapon.reloadTicks,
       pelletCount: weapon.pelletCount,
+      bulletRadius: weapon.bulletRadius,
       moveSpeedMultiplier: weapon.moveSpeedMultiplier,
       bulletSpeed: weapon.config.bulletSpeed,
       bulletLifeSeconds: weapon.config.bulletLifeSeconds,
@@ -981,6 +902,63 @@ function getPlayerSpeed(player) {
   const weapon = WEAPONS[player.currentWeapon] || WEAPONS[DEFAULT_WEAPON_ID];
   const buffMultiplier = player.buffs ? player.buffs.speedMultiplier : 1;
   return BASE_PLAYER_SPEED * weapon.moveSpeedMultiplier * buffMultiplier;
+}
+
+function loadMapConfig() {
+  const configPath = path.join(__dirname, "config", "maps.json");
+  const rawConfig = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  const maps = {};
+
+  for (const [mapId, map] of Object.entries(rawConfig.maps || {})) {
+    maps[mapId] = normalizeMapConfig(mapId, map);
+  }
+
+  const defaultMapId = rawConfig.defaultMapId || DEFAULT_MAP_ID;
+  if (!maps[defaultMapId]) {
+    throw new Error("config/maps.json must define a valid defaultMapId.");
+  }
+
+  return {
+    defaultMapId,
+    maps
+  };
+}
+
+function normalizeMapConfig(mapId, map) {
+  return {
+    id: map.id || mapId,
+    name: map.name || mapId,
+    width: Math.max(PLAYER_RADIUS * 2, Math.round(getNumber(map.width, 1200))),
+    height: Math.max(PLAYER_RADIUS * 2, Math.round(getNumber(map.height, 800))),
+    description: map.description || "",
+    obstacles: normalizeRectList(map.obstacles),
+    itemSpawnPoints: normalizePointList(map.itemSpawnPoints),
+    weaponDropPoints: normalizePointList(map.weaponDropPoints)
+  };
+}
+
+function normalizeRectList(rects) {
+  if (!Array.isArray(rects)) return [];
+
+  return rects
+    .map((rect) => ({
+      x: getNumber(rect && rect.x, 0),
+      y: getNumber(rect && rect.y, 0),
+      w: Math.max(1, getNumber(rect && rect.w, 1)),
+      h: Math.max(1, getNumber(rect && rect.h, 1))
+    }))
+    .filter((rect) => Number.isFinite(rect.x) && Number.isFinite(rect.y));
+}
+
+function normalizePointList(points) {
+  if (!Array.isArray(points)) return [];
+
+  return points
+    .map((point) => ({
+      x: getNumber(point && point.x, 0),
+      y: getNumber(point && point.y, 0)
+    }))
+    .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
 }
 
 function loadItemConfig() {
