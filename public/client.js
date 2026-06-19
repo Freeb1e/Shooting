@@ -13,11 +13,14 @@ const colorOptions = document.getElementById("colorOptions");
 
 let selfId = null;
 let latestState = null;
+let latestConfig = null;
 let mouseScreen = { x: 0, y: 0 };
 let camera = { x: 0, y: 0 };
 let moveMarkers = [];
 let joinedGame = false;
 let selectedColor = "#4cc9f0";
+let lastStatusPanelUpdate = 0;
+const STATUS_PANEL_UPDATE_MS = 200;
 
 const availableColors = [
   "#4cc9f0",
@@ -33,19 +36,34 @@ const availableColors = [
   "#f9c74f",
   "#9b5de5"
 ];
-const weaponSlots = ["pistol", "smg", "shotgun", "sniper"];
+const baseWeaponSlots = ["pistol", "smg", "shotgun", "sniper"];
 
 socket.on("self", (id) => {
   selfId = id;
 });
 
 socket.on("state", (state) => {
-  latestState = state;
+  latestState = {
+    ...(latestConfig || {}),
+    ...state
+  };
   setupMapControls();
   updateModeButtons();
   updateMapButtons();
   updateItemsToggle();
-  updateStatusPanel();
+  updateStatusPanel(false);
+});
+
+socket.on("config", (config) => {
+  latestConfig = config;
+  latestState = {
+    ...(latestState || {}),
+    ...config
+  };
+  setupMapControls();
+  updateModeButtons();
+  updateMapButtons();
+  updateStatusPanel(true);
 });
 
 socket.on("joined", () => {
@@ -93,6 +111,7 @@ window.addEventListener("keydown", (event) => {
   if (!joinedGame) return;
 
   const number = Number(event.key);
+  const weaponSlots = getAvailableWeaponSlots();
   if (number >= 1 && number <= weaponSlots.length) {
     socket.emit("switchWeapon", { weaponId: weaponSlots[number - 1] });
   }
@@ -111,7 +130,7 @@ function render() {
   ctx.fillStyle = "#101318";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  if (!latestState) {
+  if (!latestState || !latestState.players) {
     drawLoadingText();
     return;
   }
@@ -335,6 +354,16 @@ function drawItem(item) {
     ctx.beginPath();
     ctx.arc(screen.x, screen.y, item.radius - 5, 0, Math.PI * 2);
     ctx.stroke();
+  } else if (item.type === "weapon_drop") {
+    ctx.fillRect(screen.x - item.radius, screen.y - item.radius, item.radius * 2, item.radius * 2);
+    ctx.strokeRect(screen.x - item.radius, screen.y - item.radius, item.radius * 2, item.radius * 2);
+    ctx.strokeStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.moveTo(screen.x - 8, screen.y);
+    ctx.lineTo(screen.x + 8, screen.y);
+    ctx.moveTo(screen.x, screen.y - 8);
+    ctx.lineTo(screen.x, screen.y + 8);
+    ctx.stroke();
   }
 
   ctx.restore();
@@ -389,6 +418,7 @@ function drawHud() {
     : "-";
   const itemsText = latestState.itemsEnabled ? "开启" : "关闭";
   const weaponText = getWeaponHudText(me);
+  const weaponCount = getAvailableWeaponSlots().length;
 
   ctx.fillStyle = "rgba(0, 0, 0, 0.42)";
   ctx.fillRect(14, 14, 330, 206);
@@ -402,7 +432,7 @@ function drawHud() {
   ctx.fillText(`道具：${itemsText}`, 28, 136);
   ctx.fillText(`第 ${latestState.roundNumber || 1} 局，存活：${aliveCount}`, 28, 160);
   ctx.fillText(`武器：${weaponText}`, 28, 184);
-  ctx.fillText("1-4 切枪，R 换弹", 28, 208);
+  ctx.fillText(`1-${weaponCount} 切枪，R 换弹`, 28, 208);
 
   drawRoundBanner();
 }
@@ -455,8 +485,11 @@ function drawScoreboard(players) {
   }
 }
 
-function updateStatusPanel() {
+function updateStatusPanel(force) {
   if (!latestState || !joinedGame) return;
+  const now = performance.now();
+  if (!force && now - lastStatusPanelUpdate < STATUS_PANEL_UPDATE_MS) return;
+  lastStatusPanelUpdate = now;
 
   const players = Object.values(latestState.players);
   const me = latestState.players[selfId];
@@ -473,13 +506,11 @@ function updateWeaponStatus(me) {
   const currentWeapon = latestState.weapons[me.currentWeapon];
   const currentState = me.weapons && me.weapons[me.currentWeapon];
   const speedText = currentWeapon ? `${Math.round(currentWeapon.moveSpeedMultiplier * 100)}%` : "-";
-  const reloadText = currentState && currentState.reloadRemaining > 0
-    ? `换弹中 ${formatTicks(currentState.reloadRemaining)}s`
-    : "可射击";
+  const reloadText = getWeaponStatusText(currentWeapon, currentState);
 
   weaponStatus.innerHTML = `
     <div class="weapon-title">
-      <span>当前武器：${escapeHtml(currentWeapon ? currentWeapon.name : "-")}</span>
+      <span>当前武器：${escapeHtml(currentWeapon ? currentWeapon.name : "-")}${currentWeapon && currentWeapon.dropOnly ? " · 空投" : ""}</span>
       <span>${escapeHtml(reloadText)}</span>
     </div>
     <div class="weapon-line">
@@ -494,10 +525,7 @@ function updateWeaponStatus(me) {
     <div class="bar">
       <div class="bar-fill" style="width: ${getAmmoRatio(currentState, currentWeapon) * 100}%; background: #7ee0ff;"></div>
     </div>
-    <div class="weapon-line"><span class="weapon-key">1</span><span>手枪</span></div>
-    <div class="weapon-line"><span class="weapon-key">2</span><span>冲锋枪</span></div>
-    <div class="weapon-line"><span class="weapon-key">3</span><span>霰弹枪</span></div>
-    <div class="weapon-line"><span class="weapon-key">4</span><span>狙击枪</span></div>
+    ${getWeaponShortcutHtml(me)}
   `;
 }
 
@@ -531,7 +559,7 @@ function updatePlayerStatusList(players) {
         <div class="player-line"><span>HP</span><span>${player.hp}/${player.maxHp}</span></div>
         <div class="bar"><div class="bar-fill" style="width: ${hpRatio * 100}%; background: ${hpRatio > 0.35 ? "#35d07f" : "#ff5a5f"};"></div></div>
         <div class="player-line"><span>K/D</span><span>${player.kills || 0}/${player.deaths || 0}</span></div>
-        <div class="player-line"><span>武器</span><span>${escapeHtml(weapon ? weapon.name : "-")}</span></div>
+        <div class="player-line"><span>武器</span><span>${escapeHtml(weapon ? weapon.name : "-")}${weapon && weapon.dropOnly ? " · 空投" : ""}</span></div>
         <div class="player-line"><span>速度</span><span>${escapeHtml(speedText)}</span></div>
         ${getBuffStatusHtml(player)}
         <div class="player-line"><span>弹药</span><span>${weaponState ? weaponState.loaded : 0}/${weapon ? weapon.magazineSize : 0}</span></div>
@@ -717,8 +745,49 @@ function getWeaponHudText(player) {
   const weaponState = player.weapons && player.weapons[player.currentWeapon];
   if (!weapon || !weaponState) return "-";
 
-  const status = weaponState.reloadRemaining > 0 ? "换弹中" : `${weaponState.loaded}/${weapon.magazineSize}`;
+  const limitedDrop = weapon.dropOnly && latestState.gameMode !== "deathmatch";
+  const status = limitedDrop
+    ? `限定 ${weaponState.loaded}/${weapon.magazineSize}`
+    : weaponState.reloadRemaining > 0
+      ? "换弹中"
+      : `${weaponState.loaded}/${weapon.magazineSize}`;
   return `${weapon.name} ${status}`;
+}
+
+function getAvailableWeaponSlots() {
+  if (!latestState || !latestState.weapons) return baseWeaponSlots;
+
+  const me = latestState.players[selfId];
+  const allWeaponIds = Object.keys(latestState.weapons);
+  const dropWeaponIds = allWeaponIds.filter((weaponId) => latestState.weapons[weaponId].dropOnly);
+  const ownedDropWeaponIds = me && me.weapons
+    ? dropWeaponIds.filter((weaponId) => Boolean(me.weapons[weaponId]))
+    : [];
+
+  if (latestState.gameMode === "deathmatch") {
+    return [...baseWeaponSlots, ...dropWeaponIds].filter((weaponId) => latestState.weapons[weaponId]);
+  }
+
+  return [...baseWeaponSlots, ...ownedDropWeaponIds].filter((weaponId) => latestState.weapons[weaponId]);
+}
+
+function getWeaponShortcutHtml(player) {
+  const weaponSlots = getAvailableWeaponSlots();
+  return weaponSlots.map((weaponId, index) => {
+    const weapon = latestState.weapons[weaponId];
+    const owned = player && player.weapons && player.weapons[weaponId];
+    const label = weapon.dropOnly && latestState.gameMode !== "deathmatch" && !owned
+      ? `${weapon.name} 未拾取`
+      : weapon.name;
+
+    return `<div class="weapon-line"><span class="weapon-key">${index + 1}</span><span>${escapeHtml(label)}${weapon.dropOnly ? " · 空投" : ""}</span></div>`;
+  }).join("");
+}
+
+function getWeaponStatusText(weapon, weaponState) {
+  if (!weapon || !weaponState) return "-";
+  if (weapon.dropOnly && latestState.gameMode !== "deathmatch") return "限定弹量";
+  return weaponState.reloadRemaining > 0 ? `换弹中 ${formatTicks(weaponState.reloadRemaining)}s` : "可射击";
 }
 
 function getBuffStatusHtml(player) {

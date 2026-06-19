@@ -56,6 +56,36 @@
       "pelletCount": 1,
       "spreadDegrees": 0,
       "moveSpeedMultiplier": 0.86
+    },
+    "heavy_mg": {
+      "id": "heavy_mg",
+      "name": "空投重机枪",
+      "magazineSize": 40,
+      "damage": 12,
+      "bulletRadius": 5,
+      "bulletSpeed": 15,
+      "bulletLifeSeconds": 2.6,
+      "cooldownMs": 70,
+      "reloadMs": 2400,
+      "pelletCount": 1,
+      "spreadDegrees": 3,
+      "moveSpeedMultiplier": 0.75,
+      "dropOnly": true
+    },
+    "burst_rifle": {
+      "id": "burst_rifle",
+      "name": "空投三连发",
+      "magazineSize": 18,
+      "damage": 16,
+      "bulletRadius": 4,
+      "bulletSpeed": 60,
+      "bulletLifeSeconds": 2.4,
+      "cooldownMs": 420,
+      "reloadMs": 1800,
+      "pelletCount": 3,
+      "spreadDegrees": 6,
+      "moveSpeedMultiplier": 0.92,
+      "dropOnly": true
     }
   }
 }

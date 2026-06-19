@@ -10,6 +10,7 @@ const io = new Server(server);
 
 const PORT = process.env.PORT || 3000;
 const TICK_RATE = 60;
+const BROADCAST_RATE = 20;
 const DEFAULT_MAP_ID = "open_field";
 const ORIGINAL_TICK_RATE = 30;
 const TICK_SCALE = ORIGINAL_TICK_RATE / TICK_RATE;
@@ -52,6 +53,11 @@ const MAPS = {
       { x: 420, y: 900 },
       { x: 920, y: 820 },
       { x: 1500, y: 900 }
+    ],
+    weaponDropPoints: [
+      { x: 900, y: 560 },
+      { x: 1540, y: 560 },
+      { x: 260, y: 560 }
     ]
   },
   alley: {
@@ -77,6 +83,11 @@ const MAPS = {
       { x: 950, y: 210 },
       { x: 1310, y: 470 },
       { x: 1180, y: 840 }
+    ],
+    weaponDropPoints: [
+      { x: 380, y: 470 },
+      { x: 700, y: 470 },
+      { x: 1320, y: 760 }
     ]
   },
   arena: {
@@ -104,6 +115,12 @@ const MAPS = {
       { x: 1320, y: 780 },
       { x: 800, y: 300 },
       { x: 800, y: 700 }
+    ],
+    weaponDropPoints: [
+      { x: 800, y: 300 },
+      { x: 800, y: 700 },
+      { x: 210, y: 500 },
+      { x: 1390, y: 500 }
     ]
   }
 };
@@ -126,6 +143,7 @@ app.use(express.static("public"));
 
 io.on("connection", (socket) => {
   socket.emit("self", socket.id);
+  socket.emit("config", getStaticConfig());
 
   socket.on("join", (data) => {
     if (players[socket.id]) return;
@@ -151,11 +169,13 @@ io.on("connection", (socket) => {
       kills: 0,
       deaths: 0,
       currentWeapon: DEFAULT_WEAPON_ID,
+      fallbackWeaponAfterDrop: DEFAULT_WEAPON_ID,
       weapons: createWeaponStates(),
       buffs: createBuffState()
     };
 
     socket.emit("joined", { id: socket.id });
+    socket.emit("config", getStaticConfig());
   });
 
   socket.on("move", (data) => {
@@ -177,6 +197,8 @@ io.on("connection", (socket) => {
   socket.on("switchWeapon", (data) => {
     const player = players[socket.id];
     if (!player || !isValidWeaponId(data && data.weaponId)) return;
+    ensurePracticeWeapon(player, data.weaponId);
+    if (!canPlayerUseWeapon(player, data.weaponId)) return;
 
     player.currentWeapon = data.weaponId;
   });
@@ -195,6 +217,7 @@ io.on("connection", (socket) => {
     gameMode = data.mode;
     roundNumber = 0;
     startNewRound();
+    broadcastConfigToAll();
   });
 
   socket.on("setMap", (data) => {
@@ -204,6 +227,7 @@ io.on("connection", (socket) => {
     currentMapId = data.mapId;
     roundNumber = 0;
     startNewRound();
+    broadcastConfigToAll();
   });
 
   socket.on("setItemsEnabled", (data) => {
@@ -227,8 +251,11 @@ setInterval(() => {
   updateItems();
   updateRespawns();
   updateRound();
-  broadcastState();
 }, 1000 / TICK_RATE);
+
+setInterval(() => {
+  broadcastState();
+}, 1000 / BROADCAST_RATE);
 
 server.listen(PORT, () => {
   console.log(`Game server is running at http://localhost:${PORT}`);
@@ -372,7 +399,11 @@ function updateItems() {
 function updateItemSpawnCooldowns() {
   const map = getCurrentMap();
   for (let i = 0; i < map.itemSpawnPoints.length; i++) {
-    const key = getSpawnPointKey(i);
+    const key = getSpawnPointKey("item", i);
+    itemSpawnCooldowns[key] = Math.max(0, (itemSpawnCooldowns[key] || 0) - 1);
+  }
+  for (let i = 0; i < map.weaponDropPoints.length; i++) {
+    const key = getSpawnPointKey("weapon", i);
     itemSpawnCooldowns[key] = Math.max(0, (itemSpawnCooldowns[key] || 0) - 1);
   }
 }
@@ -381,30 +412,39 @@ function spawnItems() {
   if (activeItems.length >= MAX_ACTIVE_ITEMS) return;
 
   const map = getCurrentMap();
-  const itemIds = Object.keys(ITEMS);
-  if (itemIds.length === 0) return;
+  const normalItemIds = Object.keys(ITEMS).filter((itemId) => ITEMS[itemId].type !== "weapon_drop");
+  const weaponDropItem = Object.values(ITEMS).find((item) => item.type === "weapon_drop");
 
   for (let i = 0; i < map.itemSpawnPoints.length; i++) {
     if (activeItems.length >= MAX_ACTIVE_ITEMS) return;
+    if (normalItemIds.length === 0) break;
 
-    const key = getSpawnPointKey(i);
-    const occupied = activeItems.some((item) => item.spawnIndex === i);
+    const key = getSpawnPointKey("item", i);
+    const occupied = activeItems.some((item) => item.spawnType === "item" && item.spawnIndex === i);
     if (occupied || (itemSpawnCooldowns[key] || 0) > 0) continue;
 
-    const item = ITEMS[itemIds[Math.floor(Math.random() * itemIds.length)]];
+    const item = ITEMS[normalItemIds[Math.floor(Math.random() * normalItemIds.length)]];
     const point = map.itemSpawnPoints[i];
-    activeItems.push({
-      id: nextItemId++,
-      itemId: item.id,
-      name: item.name,
-      type: item.type,
-      x: point.x,
-      y: point.y,
-      radius: item.radius,
-      color: item.color,
-      spawnIndex: i
-    });
+    if (!isSpawnPointClear(point, item.radius)) continue;
+
+    activeItems.push(createItemInstance(item, point, "item", i));
     itemSpawnCooldowns[key] = item.spawnCooldownTicks;
+  }
+
+  if (!weaponDropItem) return;
+
+  for (let i = 0; i < map.weaponDropPoints.length; i++) {
+    if (activeItems.length >= MAX_ACTIVE_ITEMS) return;
+
+    const key = getSpawnPointKey("weapon", i);
+    const occupied = activeItems.some((item) => item.spawnType === "weapon" && item.spawnIndex === i);
+    if (occupied || (itemSpawnCooldowns[key] || 0) > 0) continue;
+
+    const point = map.weaponDropPoints[i];
+    if (!isSpawnPointClear(point, weaponDropItem.radius)) continue;
+
+    activeItems.push(createItemInstance(weaponDropItem, point, "weapon", i));
+    itemSpawnCooldowns[key] = weaponDropItem.spawnCooldownTicks;
   }
 }
 
@@ -452,6 +492,10 @@ function applyItem(player, itemInstance) {
     player.buffs.shield = Math.max(player.buffs.shield, item.amount);
     player.buffs.shieldRemaining = item.durationTicks;
   }
+
+  if (item.type === "weapon_drop") {
+    giveDropWeapon(player, item);
+  }
 }
 
 function updateRound() {
@@ -469,20 +513,18 @@ function broadcastState() {
     bullets,
     items: activeItems,
     itemsEnabled,
-    itemConfigs: getPublicItemConfigs(),
-    obstacles: getCurrentMap().obstacles,
-    mapWidth: getCurrentMap().width,
-    mapHeight: getCurrentMap().height,
-    currentMapId,
-    maps: getPublicMapConfigs(),
     gameMode,
     roundState,
     roundNumber,
     winner,
     nextRoundTimer,
     tickRate: TICK_RATE,
-    weapons: getPublicWeaponConfigs()
+    broadcastRate: BROADCAST_RATE
   });
+}
+
+function broadcastConfigToAll() {
+  io.emit("config", getStaticConfig());
 }
 
 function findHitPlayer(bullet) {
@@ -583,7 +625,7 @@ function shootWeapon(player, angle) {
 
   if (!weaponState || weaponState.reloadRemaining > 0 || weaponState.cooldownRemaining > 0) return;
   if (weaponState.loaded <= 0) {
-    startReload(player);
+    handleEmptyWeapon(player, weapon);
     return;
   }
 
@@ -611,7 +653,7 @@ function shootWeapon(player, angle) {
   }
 
   if (weaponState.loaded <= 0) {
-    startReload(player);
+    handleEmptyWeapon(player, weapon);
   }
 }
 
@@ -619,26 +661,75 @@ function startReload(player) {
   const weapon = WEAPONS[player.currentWeapon] || WEAPONS[DEFAULT_WEAPON_ID];
   const weaponState = player.weapons[player.currentWeapon] || player.weapons[DEFAULT_WEAPON_ID];
 
+  if (isLimitedDropWeapon(weapon)) return;
   if (!weaponState || weaponState.reloadRemaining > 0 || weaponState.loaded >= weapon.magazineSize) return;
 
   weaponState.reloadRemaining = weapon.reloadTicks;
   weaponState.cooldownRemaining = Math.max(weaponState.cooldownRemaining, weapon.reloadTicks);
 }
 
+function handleEmptyWeapon(player, weapon) {
+  if (isLimitedDropWeapon(weapon)) {
+    removeDropWeapon(player, weapon.id);
+    return;
+  }
+
+  startReload(player);
+}
+
 function refillAllWeapons(player) {
   for (const weaponId of Object.keys(player.weapons)) {
     const weapon = WEAPONS[weaponId];
+    if (weapon.dropOnly && gameMode !== "deathmatch") {
+      delete player.weapons[weaponId];
+      continue;
+    }
+
     const weaponState = player.weapons[weaponId];
     weaponState.loaded = weapon.magazineSize;
     weaponState.cooldownRemaining = 0;
     weaponState.reloadRemaining = 0;
   }
   player.currentWeapon = DEFAULT_WEAPON_ID;
+  player.fallbackWeaponAfterDrop = DEFAULT_WEAPON_ID;
+}
+
+function giveDropWeapon(player, item) {
+  const availableWeaponIds = item.weaponPool.filter((weaponId) => WEAPONS[weaponId]);
+  if (availableWeaponIds.length === 0) return;
+
+  const weaponId = availableWeaponIds[Math.floor(Math.random() * availableWeaponIds.length)];
+  const weapon = WEAPONS[weaponId];
+  const currentWeapon = WEAPONS[player.currentWeapon];
+  if (!currentWeapon || !currentWeapon.dropOnly) {
+    player.fallbackWeaponAfterDrop = player.currentWeapon;
+  }
+
+  player.weapons[weaponId] = {
+    loaded: weapon.magazineSize,
+    magazineSize: weapon.magazineSize,
+    cooldownRemaining: 0,
+    reloadRemaining: 0
+  };
+  player.currentWeapon = weaponId;
+}
+
+function removeDropWeapon(player, weaponId) {
+  delete player.weapons[weaponId];
+
+  const fallbackWeaponId = canPlayerUseWeapon(player, player.fallbackWeaponAfterDrop)
+    ? player.fallbackWeaponAfterDrop
+    : DEFAULT_WEAPON_ID;
+
+  player.currentWeapon = fallbackWeaponId;
+  player.fallbackWeaponAfterDrop = fallbackWeaponId;
 }
 
 function refillCurrentWeapon(player) {
   const weapon = WEAPONS[player.currentWeapon] || WEAPONS[DEFAULT_WEAPON_ID];
   const weaponState = player.weapons[player.currentWeapon] || player.weapons[DEFAULT_WEAPON_ID];
+  if (isLimitedDropWeapon(weapon)) return;
+
   weaponState.loaded = weapon.magazineSize;
   weaponState.reloadRemaining = 0;
   weaponState.cooldownRemaining = 0;
@@ -648,6 +739,8 @@ function createWeaponStates() {
   const states = {};
   for (const weaponId of Object.keys(WEAPONS)) {
     const weapon = WEAPONS[weaponId];
+    if (weapon.dropOnly) continue;
+
     states[weaponId] = {
       loaded: weapon.magazineSize,
       magazineSize: weapon.magazineSize,
@@ -694,8 +787,40 @@ function resetItems() {
   }
 }
 
-function getSpawnPointKey(index) {
-  return `${currentMapId}:${index}`;
+function createItemInstance(item, point, spawnType, spawnIndex) {
+  const instance = {
+    id: nextItemId++,
+    itemId: item.id,
+    name: item.name,
+    type: item.type,
+    x: point.x,
+    y: point.y,
+    radius: item.radius,
+    color: item.color,
+    spawnType,
+    spawnIndex
+  };
+
+  if (item.type === "weapon_drop") {
+    instance.weaponPool = item.weaponPool;
+  }
+
+  return instance;
+}
+
+function isSpawnPointClear(point, radius) {
+  const map = getCurrentMap();
+  const insideMap =
+    point.x >= radius &&
+    point.x <= map.width - radius &&
+    point.y >= radius &&
+    point.y <= map.height - radius;
+
+  return insideMap && !circleHitsAnyObstacle(point.x, point.y, radius);
+}
+
+function getSpawnPointKey(type, index) {
+  return `${currentMapId}:${type}:${index}`;
 }
 
 function circleHitsAnyObstacle(x, y, radius) {
@@ -730,6 +855,26 @@ function isValidMode(mode) {
 
 function isValidWeaponId(weaponId) {
   return typeof weaponId === "string" && Boolean(WEAPONS[weaponId]);
+}
+
+function canPlayerUseWeapon(player, weaponId) {
+  return isValidWeaponId(weaponId) && Boolean(player.weapons[weaponId]);
+}
+
+function ensurePracticeWeapon(player, weaponId) {
+  if (gameMode !== "deathmatch" || player.weapons[weaponId]) return;
+
+  const weapon = WEAPONS[weaponId];
+  player.weapons[weaponId] = {
+    loaded: weapon.magazineSize,
+    magazineSize: weapon.magazineSize,
+    cooldownRemaining: 0,
+    reloadRemaining: 0
+  };
+}
+
+function isLimitedDropWeapon(weapon) {
+  return weapon.dropOnly && gameMode !== "deathmatch";
 }
 
 function isValidMapId(mapId) {
@@ -793,10 +938,25 @@ function getPublicWeaponConfigs() {
       bulletLifeSeconds: weapon.config.bulletLifeSeconds,
       cooldownMs: weapon.config.cooldownMs,
       reloadMs: weapon.config.reloadMs,
-      spreadDegrees: weapon.config.spreadDegrees
+      spreadDegrees: weapon.config.spreadDegrees,
+      dropOnly: weapon.dropOnly
     };
   }
   return configs;
+}
+
+function getStaticConfig() {
+  return {
+    itemConfigs: getPublicItemConfigs(),
+    obstacles: getCurrentMap().obstacles,
+    mapWidth: getCurrentMap().width,
+    mapHeight: getCurrentMap().height,
+    currentMapId,
+    maps: getPublicMapConfigs(),
+    tickRate: TICK_RATE,
+    broadcastRate: BROADCAST_RATE,
+    weapons: getPublicWeaponConfigs()
+  };
 }
 
 function getPublicMapConfigs() {
@@ -854,6 +1014,7 @@ function normalizeItemConfig(itemId, item) {
     spawnCooldownTicks: Math.max(1, Math.round(spawnCooldownSeconds * TICK_RATE)),
     radius: Math.max(1, getNumber(item.radius, 14)),
     color: typeof item.color === "string" ? item.color : "#ffffff",
+    weaponPool: Array.isArray(item.weaponPool) ? item.weaponPool.filter((weaponId) => typeof weaponId === "string") : [],
     config: {
       durationSeconds,
       spawnCooldownSeconds
@@ -874,7 +1035,8 @@ function getPublicItemConfigs() {
       durationSeconds: item.config.durationSeconds,
       spawnCooldownSeconds: item.config.spawnCooldownSeconds,
       radius: item.radius,
-      color: item.color
+      color: item.color,
+      weaponPool: item.weaponPool
     };
   }
   return configs;
@@ -919,6 +1081,7 @@ function normalizeWeaponConfig(weaponId, weapon) {
     pelletCount: Math.max(1, Math.round(getNumber(weapon.pelletCount, 1))),
     spread: degreesToRadians(spreadDegrees),
     moveSpeedMultiplier: getNumber(weapon.moveSpeedMultiplier, 1),
+    dropOnly: weapon.dropOnly === true,
     config: {
       bulletSpeed: getNumber(weapon.bulletSpeed, 10),
       bulletLifeSeconds,

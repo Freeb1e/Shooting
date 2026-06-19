@@ -39,6 +39,15 @@
       "spawnCooldownSeconds": 28,
       "radius": 14,
       "color": "#8be9fd"
+    },
+    "weapon_drop": {
+      "id": "weapon_drop",
+      "name": "空投武器箱",
+      "type": "weapon_drop",
+      "weaponPool": ["heavy_mg", "burst_rifle"],
+      "spawnCooldownSeconds": 35,
+      "radius": 18,
+      "color": "#ff8c42"
     }
   }
 }
