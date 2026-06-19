@@ -22,6 +22,7 @@ let selectedColor = "#4cc9f0";
 let lastStatusPanelUpdate = 0;
 let inputSeq = 0;
 let predictedSelf = null;
+let predictedRemotePlayers = {};
 let pendingInputs = [];
 let renderBullets = [];
 let nextRenderBulletId = 1;
@@ -65,6 +66,10 @@ socket.on("state", (state) => {
   updateMapButtons();
   updateItemsToggle();
   updateStatusPanel(false);
+});
+
+socket.on("shot", (shot) => {
+  reconcileShotBullets(shot);
 });
 
 socket.on("config", (config) => {
@@ -149,6 +154,7 @@ function render(frameTime = performance.now()) {
   const deltaScale = getFrameDeltaScale(frameTime);
   updateMoveMarkers();
   updatePredictedSelf(deltaScale);
+  updatePredictedRemotePlayers(deltaScale);
   updateRenderBullets(deltaScale);
   ctx.fillStyle = "#101318";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -652,6 +658,7 @@ function reconcileLocalPrediction() {
   const serverSelf = latestState.players[selfId];
   if (!serverSelf) {
     predictedSelf = null;
+    predictedRemotePlayers = {};
     pendingInputs = [];
     renderBullets = [];
     return;
@@ -659,7 +666,13 @@ function reconcileLocalPrediction() {
 
   const acknowledgedSeq = serverSelf.lastProcessedInputSeq || 0;
   pendingInputs = pendingInputs.filter((input) => input.seq > acknowledgedSeq);
+  reconcileSelfPrediction(serverSelf);
+  reconcileRemotePlayerPredictions();
   reconcileRenderBullets(acknowledgedSeq);
+}
+
+function reconcileSelfPrediction(serverSelf) {
+  if (!serverSelf) return;
 
   const previousPrediction = predictedSelf;
 
@@ -698,10 +711,46 @@ function reconcileLocalPrediction() {
   }
 }
 
+function reconcileRemotePlayerPredictions() {
+  const serverPlayers = latestState.players || {};
+  const nextRemotePlayers = {};
+
+  for (const [playerId, serverPlayer] of Object.entries(serverPlayers)) {
+    if (playerId === selfId) continue;
+
+    const previousPrediction = predictedRemotePlayers[playerId];
+    nextRemotePlayers[playerId] = reconcilePlayerPrediction(previousPrediction, serverPlayer);
+  }
+
+  predictedRemotePlayers = nextRemotePlayers;
+}
+
+function reconcilePlayerPrediction(previousPrediction, serverPlayer) {
+  if (!previousPrediction || !previousPrediction.alive || !serverPlayer.alive) {
+    return clonePlayer(serverPlayer);
+  }
+
+  const drift = Math.hypot(previousPrediction.x - serverPlayer.x, previousPrediction.y - serverPlayer.y);
+  const nextPrediction = clonePlayer(serverPlayer);
+  nextPrediction.x = previousPrediction.x;
+  nextPrediction.y = previousPrediction.y;
+
+  if (drift > RECONCILE_SNAP_DISTANCE) {
+    nextPrediction.x = serverPlayer.x;
+    nextPrediction.y = serverPlayer.y;
+  } else if (drift > RECONCILE_NUDGE_DISTANCE) {
+    nextPrediction.x = lerp(previousPrediction.x, serverPlayer.x, 0.08);
+    nextPrediction.y = lerp(previousPrediction.y, serverPlayer.y, 0.08);
+  }
+
+  return nextPrediction;
+}
+
 function resetPredictionIfMapChanged(previousMapId, nextMapId) {
   if (!previousMapId || !nextMapId || previousMapId === nextMapId) return;
 
   predictedSelf = null;
+  predictedRemotePlayers = {};
   pendingInputs = [];
   renderBullets = [];
 }
@@ -721,27 +770,41 @@ function updatePredictedSelf(deltaScale) {
   ensurePredictedSelf();
   if (!predictedSelf || !predictedSelf.alive) return;
 
-  const dx = predictedSelf.targetX - predictedSelf.x;
-  const dy = predictedSelf.targetY - predictedSelf.y;
+  movePredictedPlayer(predictedSelf, deltaScale);
+}
+
+function updatePredictedRemotePlayers(deltaScale) {
+  if (!latestState || !latestState.players) return;
+
+  for (const player of Object.values(predictedRemotePlayers)) {
+    if (player.alive) {
+      movePredictedPlayer(player, deltaScale);
+    }
+  }
+}
+
+function movePredictedPlayer(player, deltaScale) {
+  const dx = player.targetX - player.x;
+  const dy = player.targetY - player.y;
   const distance = Math.hypot(dx, dy);
-  const speed = getClientPlayerSpeed(predictedSelf) * deltaScale;
+  const speed = getClientPlayerSpeed(player) * deltaScale;
 
   if (distance <= speed) {
-    const target = clampPointToMap(predictedSelf.targetX, predictedSelf.targetY, predictedSelf.radius);
-    if (!circleHitsAnyObstacle(target.x, target.y, predictedSelf.radius)) {
-      predictedSelf.x = target.x;
-      predictedSelf.y = target.y;
+    const target = clampPointToMap(player.targetX, player.targetY, player.radius);
+    if (!circleHitsAnyObstacle(target.x, target.y, player.radius)) {
+      player.x = target.x;
+      player.y = target.y;
     }
     return;
   }
 
-  const nextX = predictedSelf.x + (dx / distance) * speed;
-  const nextY = predictedSelf.y + (dy / distance) * speed;
-  const clamped = clampPointToMap(nextX, nextY, predictedSelf.radius);
+  const nextX = player.x + (dx / distance) * speed;
+  const nextY = player.y + (dy / distance) * speed;
+  const clamped = clampPointToMap(nextX, nextY, player.radius);
 
-  if (!circleHitsAnyObstacle(clamped.x, clamped.y, predictedSelf.radius)) {
-    predictedSelf.x = clamped.x;
-    predictedSelf.y = clamped.y;
+  if (!circleHitsAnyObstacle(clamped.x, clamped.y, player.radius)) {
+    player.x = clamped.x;
+    player.y = clamped.y;
   }
 }
 
@@ -760,6 +823,9 @@ function addClientSimulatedBullet(seq, shooter, angle) {
   for (let i = 0; i < pelletCount; i++) {
     const pelletAngle = pelletCount === 1 ? angle : startAngle + step * i;
     const radius = weapon.bulletRadius || 4;
+    const bulletSpeed = Number.isFinite(weapon.bulletSpeedPerTick)
+      ? weapon.bulletSpeedPerTick
+      : (weapon.bulletSpeed || 10) * 0.5;
 
     renderBullets.push({
       localId: `local-${nextRenderBulletId++}`,
@@ -770,8 +836,8 @@ function addClientSimulatedBullet(seq, shooter, angle) {
       confirmed: false,
       x: shooter.x + Math.cos(pelletAngle) * (shooter.radius + radius + 2),
       y: shooter.y + Math.sin(pelletAngle) * (shooter.radius + radius + 2),
-      vx: Math.cos(pelletAngle) * ((weapon.bulletSpeed || 10) * 0.5),
-      vy: Math.sin(pelletAngle) * ((weapon.bulletSpeed || 10) * 0.5),
+      vx: Math.cos(pelletAngle) * bulletSpeed,
+      vy: Math.sin(pelletAngle) * bulletSpeed,
       radius,
       life: Math.max(8, Math.round((weapon.bulletLifeSeconds || 1) * (latestState.tickRate || 60)))
     });
@@ -800,6 +866,20 @@ function reconcileRenderBullets(acknowledgedSeq) {
     if (!bullet.confirmed && bullet.ownerId === selfId && bullet.clientSeq > acknowledgedSeq) return true;
     return false;
   });
+}
+
+function reconcileShotBullets(shot) {
+  if (!shot || !Array.isArray(shot.bullets)) return;
+
+  for (const serverBullet of shot.bullets) {
+    const existing = findRenderBulletForServerBullet(serverBullet);
+    if (existing) {
+      adoptServerBullet(existing, serverBullet);
+      continue;
+    }
+
+    renderBullets.push(createRenderBulletFromServer(serverBullet));
+  }
 }
 
 function findRenderBulletForServerBullet(serverBullet) {
@@ -881,9 +961,10 @@ function getRenderableSelf() {
 
 function getRenderablePlayers() {
   const players = Object.values(latestState.players);
-  if (!predictedSelf) return players;
-
-  return players.map((player) => (player.id === selfId ? predictedSelf : player));
+  return players.map((player) => {
+    if (player.id === selfId && predictedSelf) return predictedSelf;
+    return predictedRemotePlayers[player.id] || player;
+  });
 }
 
 function clonePlayer(player) {

@@ -103,8 +103,15 @@ io.on("connection", (socket) => {
     if (!player || !player.alive || roundState !== "playing" || !isValidAngle(data && data.angle)) return;
 
     const inputSeq = getInputSeq(data);
-    shootWeapon(player, data.angle, inputSeq);
+    const createdBullets = shootWeapon(player, data.angle, inputSeq);
     player.lastProcessedInputSeq = Math.max(player.lastProcessedInputSeq || 0, inputSeq);
+    if (createdBullets.length > 0) {
+      io.emit("shot", {
+        ownerId: player.id,
+        clientSeq: inputSeq,
+        bullets: createdBullets
+      });
+    }
   });
 
   socket.on("switchWeapon", (data) => {
@@ -536,10 +543,10 @@ function shootWeapon(player, angle, clientSeq) {
   const weapon = WEAPONS[player.currentWeapon] || WEAPONS[DEFAULT_WEAPON_ID];
   const weaponState = player.weapons[player.currentWeapon] || player.weapons[DEFAULT_WEAPON_ID];
 
-  if (!weaponState || weaponState.reloadRemaining > 0 || weaponState.cooldownRemaining > 0) return false;
+  if (!weaponState || weaponState.reloadRemaining > 0 || weaponState.cooldownRemaining > 0) return [];
   if (weaponState.loaded <= 0) {
     handleEmptyWeapon(player, weapon);
-    return false;
+    return [];
   }
 
   weaponState.loaded -= 1;
@@ -548,10 +555,11 @@ function shootWeapon(player, angle, clientSeq) {
   const totalSpread = weapon.spread;
   const startAngle = angle - totalSpread / 2;
   const step = weapon.pelletCount > 1 ? totalSpread / Math.max(1, weapon.pelletCount - 1) : 0;
+  const createdBullets = [];
 
   for (let i = 0; i < weapon.pelletCount; i++) {
     const pelletAngle = weapon.pelletCount === 1 ? angle : startAngle + step * i;
-    bullets.push({
+    const bullet = {
       id: nextBulletId++,
       ownerId: player.id,
       weaponId: weapon.id,
@@ -563,14 +571,16 @@ function shootWeapon(player, angle, clientSeq) {
       radius: weapon.bulletRadius,
       damage: weapon.damage,
       life: weapon.bulletLife
-    });
+    };
+    bullets.push(bullet);
+    createdBullets.push({ ...bullet });
   }
 
   if (weaponState.loaded <= 0) {
     handleEmptyWeapon(player, weapon);
   }
 
-  return true;
+  return createdBullets;
 }
 
 function startReload(player) {
@@ -856,6 +866,7 @@ function getPublicWeaponConfigs() {
       bulletRadius: weapon.bulletRadius,
       moveSpeedMultiplier: weapon.moveSpeedMultiplier,
       bulletSpeed: weapon.config.bulletSpeed,
+      bulletSpeedPerTick: weapon.bulletSpeed,
       bulletLifeSeconds: weapon.config.bulletLifeSeconds,
       cooldownMs: weapon.config.cooldownMs,
       reloadMs: weapon.config.reloadMs,
